@@ -1,0 +1,230 @@
+---
+title: "maps"
+author: "Lawrence Chillrud"
+date: "1/5/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(rgdal)
+library(broom)
+
+library(tmap)
+library(maptools)
+```
+
+## Loading shape file
+
+Loading and organizing the base map for tmap...
+
+```{r}
+# load basemap
+USA <- readOGR(dsn = "~/Documents/Research_Marianthi/BNE_project/EPA_data/cb_2016_us_state_500k/", layer = "cb_2016_us_state_500k")
+
+# transform geographical coordinates to Lambert Azimuth Equal Area Projection
+USA_aea <- spTransform(USA, CRS("+proj=laea +lat_0=45 +lon_0=-100 +x_0=0 +y_0=0 +a=6370997 +b=6370997 +units=m +no_defs"))
+USA_aea@data$id <- rownames(USA_aea@data)
+
+al_hi_care <- FALSE # do we care about alaska and hawaii?
+
+if (al_hi_care) {
+  # move alaska (scaled down) and hawaii
+  alaska <- USA_aea[USA_aea$NAME == "Alaska",]
+  alaska <- elide(alaska, rotate = -50)
+  alaska <- elide(alaska, scale = max(apply(bbox(alaska), 1, diff)) / 2.3)
+  alaska = elide(alaska, shift=c(-2100000, -2700000))
+  proj4string(alaska) = proj4string(USA_aea)
+  
+  hawaii = USA_aea[USA_aea$NAME == "Hawaii",]
+  hawaii = elide(hawaii, rotate=-35)
+  hawaii = elide(hawaii, shift=c(5600000, -1800000))
+  proj4string(hawaii) = proj4string(USA_aea)
+}
+
+# remove alaska and hawaii from base map 
+USA_aea <- USA_aea[!USA_aea$NAME %in% c("Alaska", "Hawaii"), ]
+
+if (al_hi_care) {
+  # and substitute transformed versions
+  USA_aea <- rbind(USA_aea, alaska, hawaii)
+}
+
+us_cont <- USA_aea[!USA_aea$NAME %in% c("Puerto Rico", "Commonwealth of the Northern Mariana Islands", "Guam", "American Samoa", "United States Virgin Islands"), ]
+
+```
+
+## Loading EPA data in
+
+```{r}
+# load EPA data and get relevant states:
+epa <- read.csv("~/Documents/Research_Marianthi/BNE_project/EPA_data/out/annual_75_poc1.csv", header=TRUE, na.strings = c("", "NA"), stringsAsFactors = FALSE) %>% filter(Year == 2016, !State.Name %in% c("Puerto Rico", "Virgin Islands", "Country Of Mexico")) %>% select(Monitor.ID, Latitude, Longitude, State.Name, Datum, Required.Day.Count, Arithmetic.Mean)
+
+# split up the EPA data as its Lon Lat coordinates aren't consistent:
+epa_nad83 <- epa %>% filter(Datum == "NAD83") %>% select(!Datum)
+epa_wgs84 <- epa %>% filter(Datum == "WGS84") %>% select(!Datum)
+
+# standardize Lon Lat coords:
+epa_nad83 <- SpatialPointsDataFrame(coords = epa_nad83[, c("Longitude", "Latitude")], data = epa_nad83, proj4string = CRS("+init=epsg:4269"))
+epa_nad83_as_wgs84 <- spTransform(epa_nad83, CRS("+init=epsg:4326"))
+epa_wgs84 <- SpatialPointsDataFrame(coords = epa_wgs84[, c("Longitude", "Latitude")], data = epa_wgs84, proj4string = CRS("+init=epsg:4326"))
+monitors_b <- rbind(epa_nad83_as_wgs84, epa_wgs84)
+
+# using the tmap package:
+monitors <- spTransform(monitors_b, CRS("+proj=laea +lat_0=45 +lon_0=-100 +x_0=0 +y_0=0 +a=6370997 +b=6370997 +units=m +no_defs"))
+monitors@data$id <- rownames(monitors_b@data)
+
+# using the usmap package:
+#monitors_b_df <- as.data.frame(monitors_b@data)
+#mbt <- usmap::usmap_transform(monitors_b_df %>% select(Longitude, Latitude, State.Name, Monitor.ID, Required.Day.Count))
+
+if (al_hi_care) {
+  # if we care about hawaii and alaska...
+  monitors_al <- monitors[monitors$State.Name == "Alaska",]
+  monitors_al <- elide(monitors_al, rotate = -50)
+  monitors_al <- elide(monitors_al, scale = max(apply(bbox(monitors_al), 1, diff)) / 2.3)
+  monitors_al = elide(monitors_al, shift=c(-2200000, -2500000))
+  proj4string(monitors_al) = proj4string(monitors)
+  
+  monitors_hi = monitors[monitors$State.Name == "Hawaii",]
+  monitors_hi = elide(monitors_hi, rotate=-35)
+  monitors_hi = elide(monitors_hi, shift=c(5400000, -1350000))
+  proj4string(monitors_hi) = proj4string(monitors)
+}
+
+monitors <- monitors[!monitors$State.Name %in% c("Alaska", "Hawaii"), ]
+
+if (al_hi_care) {
+  monitors <- rbind(monitors, monitors_al, monitors_hi)
+}
+
+```
+
+## getting the LOST monitors for 2016
+
+```{r}
+epa_season <- read.csv("~/Documents/Research_Marianthi/BNE_project/EPA_data/out/annual_season75_poc1.csv", header=TRUE, na.strings = c("", "NA"), stringsAsFactors = FALSE) %>% filter(Year == 2016, !State.Name %in% c("Puerto Rico", "Virgin Islands", "Country Of Mexico", "Canada")) %>% select(Monitor.ID, Latitude, Longitude, State.Name, Datum)
+
+
+lost_monitors <- setdiff(unique(epa$Monitor.ID), unique(epa_season$Monitor.ID))
+
+monitors@data <- monitors@data %>% mutate(Lost = ifelse(Monitor.ID %in% lost_monitors, "Lost", "Kept"))
+monitors@data$Lost <- as.factor(monitors@data$Lost)
+monitors@data$State.Name <- as.factor(monitors@data$State.Name)
+levels(monitors@data$State.Name) <- c(levels(monitors@data$State.Name), levels(as.factor(us_cont@data$NAME)))
+# using the usmap package:
+#mbt <- mbt %>% mutate(Lost = ifelse(Monitor.ID %in% lost_monitors, "red", "black"))
+#mbt$Lost <- as.factor(mbt$Lost) 
+```
+
+## plotting LOST monitors
+
+```{r}
+total_count <- monitors@data %>% count(State.Name, .drop = FALSE)
+total_count$n[total_count$n == 0] <- 1
+lost_count <- monitors@data %>% filter(Lost == "Lost") %>% count(State.Name, .drop = FALSE)
+percent_lost <- lost_count$n / total_count$n * 100
+plost <- data.frame(State.Name = as.character(total_count$State.Name), percent_lost)
+perc_lost <- numeric(length = length(us_cont@data$NAME))
+
+for (i in 1:length(us_cont@data$NAME)) {
+  s <- tolower(us_cont@data$NAME[i])
+  perc_lost[i] <- plost[tolower(plost$State.Name) == s, 2]
+}
+us_cont@data <- us_cont@data %>% mutate(perc_lost = round(perc_lost, 2))
+
+tmap_mode("view")
+interactive_map <- tm_shape(us_cont, projection=CRS(proj4string(us_cont))) + 
+  tm_polygons("perc_lost", breaks = c(0, 5, 10, 15, 20, 40, 60, 80, 100), title = "% Monitors Lost") + 
+  tm_text("perc_lost") +
+  tm_layout(frame=FALSE, bg.color="lightblue", inner.margins = c(.05,.02,.02,.02)) + tm_shape(monitors, projection = CRS(proj4string(monitors))) + 
+  tm_symbols(size = 0.1, col = "Lost", palette = c(Lost = "red", Kept = "black"), alpha = .4, title.col = "Monitor Status")
+
+saveRDS(interactive_map, file = "~/Documents/Research_Marianthi/BNE_project/EPA_data/lost_mons_map_2016.RDS")
+
+# using the usmap package:
+#usmap::plot_usmap() + geom_point(data = mbt, aes(x = Longitude.1, y = Latitude.1), color = mbt$Lost, size=1)
+```
+
+## plotting and saving yearly / seasonal monitor SCHEDULES
+
+```{r}
+tmap_mode("plot")
+
+mons_df <- as.data.frame(monitors)
+
+mons_k <- mons_df %>% filter(Lost == "Kept")
+mons_k <- SpatialPointsDataFrame(coords = mons_k[, c("Longitude.1", "Latitude.1")], data = mons_k, proj4string = CRS("+proj=laea +lat_0=45 +lon_0=-100 +x_0=0 +y_0=0 +a=6370997 +b=6370997 +units=m +no_defs"))
+
+mons_l <- mons_df %>% filter(Lost == "Lost")
+mons_l <- SpatialPointsDataFrame(coords = mons_l[, c("Longitude.1", "Latitude.1")], data = mons_l, proj4string = CRS("+proj=laea +lat_0=45 +lon_0=-100 +x_0=0 +y_0=0 +a=6370997 +b=6370997 +units=m +no_defs"))
+
+cuts <- c(0, 66, 126, 367)
+  
+mons_scheds <- tm_shape(us_cont, projection=CRS(proj4string(us_cont))) + 
+  tm_polygons(col = "white") + 
+  tm_layout(title = "2016 Monitor Observation Schedules (75% Yearly Threshold)", title.position = c("center", "top"), title.size = 1, frame=FALSE, bg.color="lightblue", inner.margins = c(.2,.2,.1,.02)) + 
+  tm_shape(monitors, projection = CRS(proj4string(mons_k))) + 
+  tm_symbols(title.col = "Observation Schedule", size = 0.35, col = "Required.Day.Count",palette = "viridis", breaks = cuts, labels = c("1/6 days", "1/3 days", "Every day"), legend.hist = T) + 
+  tm_legend(legend.position = c("left", "bottom"), legend.width = .65, legend.height = .6)
+
+mons_scheds_lost <- tm_shape(us_cont, projection=CRS(proj4string(us_cont))) + 
+  tm_polygons(col = "white") + 
+  tm_layout(title = "2016 Monitor Observation Schedules: Which monitors do we lose when going from 75% year -> 75% season (lost mons shown in bold)", title.position = c("center", "top"), title.size = 1, frame=FALSE, bg.color="lightblue", inner.margins = c(.2,.2,.1,.02)) + 
+  tm_shape(mons_k, projection = CRS(proj4string(mons_k))) + 
+  tm_symbols(title.col = "Monitors we would be keeping", size = 0.25, col = "Required.Day.Count", border.col = "white",palette = "viridis", breaks = cuts, labels = c("1/6 days", "1/3 days", "Every day"), legend.hist = T, alpha = .25) + 
+  tm_shape(mons_l, projection = CRS(proj4string(mons_l))) + 
+  tm_symbols(title.col = "Monitors we would be losing", size = 0.35, col = "Required.Day.Count", palette = "viridis", breaks = cuts, labels = c("1/6 days", "1/3 days", "Every day"), legend.hist = T, alpha = 1) + 
+  tm_legend(legend.position = c("left", "bottom"), legend.width = .65, legend.height = .6)
+
+saveRDS(mons_scheds, file = "mons_scheds_2016.RDS")
+saveRDS(mons_scheds_lost, file = "mons_scheds_lost_2016.RDS")
+```
+
+## appending MEDIANS data for each state
+
+```{r}
+# need State.Medians variable from lost_monitors.Rmd for this to work
+state_medians_dict <- data.frame(State = stest, round(State.Medians, 2))
+
+State.Median <- numeric(length = length(us_cont@data$NAME))
+
+for (i in 1:length(us_cont@data$NAME)) {
+  s <- tolower(us_cont@data$NAME[i])
+  State.Median[i] <- state_medians_dict[tolower(state_medians_dict$State) == s, 2]
+}
+
+us_cont@data <- us_cont@data %>% mutate(State.Median = round(State.Median, 2))
+tmap_mode("plot")
+states_map <- tm_shape(us_cont, projection=CRS(proj4string(us_cont))) + 
+              tm_polygons("State.Median", title = "Median % Lost Monitors", breaks = c(0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 100)) + 
+              tm_layout(title = "Median % monitors lost: 2000 - 2016", title.position = c("center", "top"), frame=FALSE, bg.color="lightblue", inner.margins = c(.05,.02,.02,.02)) + tm_text("State.Median")
+
+saveRDS(states_map, file = "~/Documents/Research_Marianthi/BNE_project/EPA_data/median_lost_mons_map.RDS")
+```
+
+## monitor annual values...
+
+```{r}
+mon_reds <- tm_shape(us_cont, projection=CRS(proj4string(us_cont))) + 
+              tm_polygons("white") +
+              tm_layout(title = "Monitor annual averages for 2016 (75% Yearly Threshold)", title.position = c("center", "top"), frame=FALSE, bg.color="lightblue", inner.margins = c(.075,.075,.02,.02)) + 
+  tm_shape(monitors, projection = CRS(proj4string(monitors))) + 
+  tm_symbols(title.col = "Monitor Mean", size = 0.35, col = "Arithmetic.Mean", legend.hist = T, style = "kmeans") + 
+  tm_legend(legend.position = c("left", "bottom"), legend.width = .65, legend.height = .6)
+
+saveRDS(mon_reds, file = "~/Documents/Research_Marianthi/BNE_project/EPA_data/monitor_readings_2016.RDS")
+
+mon_reds_lost <- tm_shape(us_cont, projection=CRS(proj4string(us_cont))) + 
+              tm_polygons("white") +
+              tm_layout(title = "Monitor annual averages for 2016 (Lost monitors in bold)", title.position = c("center", "top"), frame=FALSE, bg.color="lightblue", inner.margins = c(.2,.2,.1,.02)) + 
+  tm_shape(mons_k, projection = CRS(proj4string(mons_k))) + 
+  tm_symbols(title.col = "Means for Monitors Kept", size = 0.25, col = "Arithmetic.Mean", border.col = "white", legend.hist = T, style = "kmeans", alpha = 0.25) + 
+  tm_shape(mons_l, projection = CRS(proj4string(mons_l))) + 
+  tm_symbols(title.col = "Means for Monitors Lost", size = 0.35, col = "Arithmetic.Mean", legend.hist = T, style = "kmeans", alpha = 1) + 
+  tm_legend(legend.position = c("left", "bottom"), legend.width = .65, legend.height = .6)
+
+saveRDS(mon_reds_lost, file = "~/Documents/Research_Marianthi/BNE_project/EPA_data/monitor_readings_lost_2016.RDS")
+
+```

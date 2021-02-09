@@ -1,0 +1,91 @@
+---
+title: "Mapping Monitor Data"
+author: "Lawrence Chillrud"
+date: "1/5/2021"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(rgdal)
+library(tmap)
+```
+
+```{r shapefile}
+############## LOAD & FORMAT SHAPEFILE ##############
+
+# load the base map from our shapefile
+USA.shp <- readOGR(dsn = here::here("cb_2016_us_state_500k/"), layer = "cb_2016_us_state_500k")
+
+# transform geographical coordinates to Lambert Azimuth Equal Area Projection
+USA.aea <- spTransform(USA.shp, CRS("+proj=laea +lat_0=45 +lon_0=-100 +x_0=0 +y_0=0 +a=6370997 +b=6370997 +units=m +no_defs"))
+
+# get rid of regions we don't care about.
+# we don't care about alaska, hawaii, puerto rico, virgin islands...
+# because they're annoying to deal with when plotting the maps.
+# plus, those regions don't have many monitors anyway.
+# we don't care about the rest because we have no monitor data for them.
+# now we have our map ready in this USA.cont Large SpatialPolygonsDataFrame object
+USA.cont <- USA.aea[!USA.aea$NAME %in% c("Alaska", "Hawaii", "Puerto Rico", "Commonwealth of the Northern Mariana Islands", "Guam", "American Samoa", "United States Virgin Islands"), ]
+```
+
+```{r epa data}
+############## LOAD & FORMAT EPA DATA ##############
+
+# load EPA monitor data in
+# EPA monitor data could be: "EPA_monitor_data/annual_75.csv" or "EPA_monitor_data/annual_season_75.csv"
+# we filter by the year we care about (2016) and remove states we don't care about
+# we select the relevant columns for our mapping. 
+EPA <- read.csv(here::here("EPA_monitor_data/annual_75.csv"), 
+                header=TRUE, 
+                na.strings = c("", "NA"), 
+                stringsAsFactors = FALSE) %>% 
+        filter(Year == 2016, !State.Name %in% c("Alaska", "Hawaii", "Puerto Rico", "Virgin Islands", "Country Of Mexico")) %>% 
+        select(Monitor.ID, Latitude, Longitude, State.Name, Datum, Required.Day.Count, Arithmetic.Mean)
+
+# split up the EPA data as its Lon Lat coordinates are annoyingly inconsistent,
+# therefore we will need to standardize them:
+EPA.nad83 <- EPA %>% filter(Datum == "NAD83") %>% select(!Datum)
+EPA.wgs84 <- EPA %>% filter(Datum == "WGS84") %>% select(!Datum)
+
+# standardize Lon Lat coords:
+EPA.nad83 <- SpatialPointsDataFrame(coords = EPA.nad83[, c("Longitude", "Latitude")], data = EPA.nad83, proj4string = CRS("+init=epsg:4269"))
+EPA.nad83_as_wgs84 <- spTransform(EPA.nad83, CRS("+init=epsg:4326"))
+EPA.wgs84 <- SpatialPointsDataFrame(coords = EPA.wgs84[, c("Longitude", "Latitude")], data = EPA.wgs84, proj4string = CRS("+init=epsg:4326"))
+
+# rejoin the split data for one standardized EPA dataset.
+EPA.std <- rbind(EPA.nad83_as_wgs84, EPA.wgs84)
+
+# transform geographical coordinates to Lambert Azimuth Equal Area Projection to mach our map
+EPA.aea <- spTransform(EPA.std, CRS("+proj=laea +lat_0=45 +lon_0=-100 +x_0=0 +y_0=0 +a=6370997 +b=6370997 +units=m +no_defs"))
+```
+
+```{r create maps}
+############## MAKE MAP OF MONITOR SCHEDULES ##############
+
+cuts <- c(0, 66, 126, 367)
+  
+monitor_schedules_map <- tm_shape(USA.cont, projection=CRS(proj4string(USA.cont))) + 
+  tm_polygons(col = "white") + 
+  tm_layout(title = "2016 Monitor Observation Schedules (75% Yearly Threshold)", title.position = c("center", "top"), title.size = 1, frame=FALSE, bg.color="lightblue", inner.margins = c(.2,.2,.1,.02)) + 
+  tm_shape(EPA.aea, projection = CRS(proj4string(EPA.aea))) + 
+  tm_symbols(title.col = "Observation Schedule", size = 0.35, col = "Required.Day.Count", palette = "viridis", breaks = cuts, labels = c("1/6 days", "1/3 days", "Every day"), legend.hist = T) + 
+  tm_legend(legend.position = c("left", "bottom"), legend.width = .65, legend.height = .6)
+
+############## MAKE MAP OF MONITOR DATA ##############
+
+monitor_data_map <- tm_shape(USA.cont, projection=CRS(proj4string(USA.cont))) + 
+  tm_polygons("white") +
+  tm_layout(title = "2016 Monitor Annual Averages (75% Yearly Threshold)", title.position = c("center", "top"), title.size = 1, frame=FALSE, bg.color="lightblue", inner.margins = c(.2,.2,.1,.02)) + 
+  tm_shape(EPA.aea, projection = CRS(proj4string(EPA.aea))) + 
+  tm_symbols(title.col = "Monitor Mean", size = 0.35, col = "Arithmetic.Mean", legend.hist = T, style = "kmeans") + 
+  tm_legend(legend.position = c("left", "bottom"), legend.width = .65, legend.height = .6)
+```
+
+```{r plot maps}
+############## PLOT MAPS ##############
+
+tmap_mode("plot") # change "plot" to "view" for interactive maps.
+monitor_schedules_map
+monitor_data_map
+```
